@@ -6,5 +6,16 @@
     "adapter tuning",
     "learning rate scheduling",
     "low-resource fine-tuning"
+  ],
+  "research_study_list": [
+    {
+      "title": "Parameter Efficient Fine-tuning via Cross Block Orchestration for Segment Anything Model"
+    },
+    {
+      "title": "Increasing Model Capacity for Free: A Simple Strategy for Parameter Efficient Fine-tuning"
+    },
+    {
+      "title": "Variational Information Bottleneck for Effective Low-Resource Fine-Tuning"
+    }
   ]
 }
