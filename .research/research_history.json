@@ -96,7 +96,45 @@
     },
     "iterations": [
       {
-        "method": "We propose CAPABOOST-LMS (Learnable Mask Scaling).  The change is only to multiply each parallel masked low-rank update with one scalar gate g_i that is learned during fine-tuning and to add an L1 penalty that pushes the gates toward 0, so unneeded modules are suppressed.\n\nFor a LoRA-style layer in CAPABOOST the original update is\n  ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai)\nWe replace it with\n  ΔW = Σ_i σ(s_i) · (B_i ⊙ m_bi)(A_i ⊙ m_ai)   (1)\nwhere s_i is an unrestricted real parameter, σ(·) is the sigmoid, and g_i = σ(s_i)∈(0,1).  The learning objective becomes\n  L_total = L_task + λ Σ_i g_i                               (2)\nwith a small λ (e.g. 1e-4).  Equation (2) keeps modules that help the task loss and prunes the others by driving the corresponding g_i→0.  At inference time we hard-threshold g_i (e.g. g_i>0.5) to obtain a sparse, capacity-adjusted model with exactly the same computational form as CAPABOOST."
+        "method": "We propose CAPABOOST-LMS (Learnable Mask Scaling).  The change is only to multiply each parallel masked low-rank update with one scalar gate g_i that is learned during fine-tuning and to add an L1 penalty that pushes the gates toward 0, so unneeded modules are suppressed.\n\nFor a LoRA-style layer in CAPABOOST the original update is\n  ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai)\nWe replace it with\n  ΔW = Σ_i σ(s_i) · (B_i ⊙ m_bi)(A_i ⊙ m_ai)   (1)\nwhere s_i is an unrestricted real parameter, σ(·) is the sigmoid, and g_i = σ(s_i)∈(0,1).  The learning objective becomes\n  L_total = L_task + λ Σ_i g_i                               (2)\nwith a small λ (e.g. 1e-4).  Equation (2) keeps modules that help the task loss and prunes the others by driving the corresponding g_i→0.  At inference time we hard-threshold g_i (e.g. g_i>0.5) to obtain a sparse, capacity-adjusted model with exactly the same computational form as CAPABOOST.",
+        "experimental_design": {
+          "experiment_summary": "We will verify that CAPABOOST-LMS, a minimal extension of CAPABOOST that learns a scalar gate for every parallel masked low-rank module, alleviates over-fitting and reallocates capacity automatically.  Using the DeBERTa-v3-base encoder, we fine-tune with Parameter-Efficient Fine-Tuning (PEFT) in three flavours: (1) standard LoRA, (2) CAPABOOST (fixed use of all parallel modules) and (3) our CAPABOOST-LMS (each module multiplied by a learnable gate g_i regularised with an L1 term λ∑g_i).  All methods insert four rank-32 low-rank adapters into every attention and MLP weight matrix so raw capacity is identical.  Training is performed on the SQuAD-v2 question-answering benchmark with a very tight 0.08 % parameter budget.  The loss used by CAPABOOST-LMS is L_total = L_QA + λ∑g_i; at inference time gates with g_i ≤ 0.5 are hard-pruned, yielding a sparser update without changing the computational form.  We sweep λ and other standard hyper-parameters with grid search and report mean F1 / EM over three random seeds.  Because the available cluster provides 8 × A100-80 GB GPUs, runs can be distributed with data parallelism or accelerated via DeepSpeed-Zero-2, although each single run fits comfortably on one GPU.",
+          "evaluation_metrics": [
+            "F1",
+            "Exact Match"
+          ],
+          "proposed_method": "CAPABOOST-LMS (Learnable Mask Scaling) augments each masked low-rank update in CAPABOOST with a single learnable gate.  For one Transformer weight W the original CAPABOOST update is ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai).  CAPABOOST-LMS replaces it with ΔW = Σ_i σ(s_i)(B_i ⊙ m_bi)(A_i ⊙ m_ai), where s_i is an unrestricted scalar and g_i = σ(s_i)∈(0,1).  The complete training objective is L_total = L_task + λ Σ_i g_i with a small positive λ, driving useless gates towards 0 and therefore shutting whole modules off.  Implementation requires: (a) adding one nn.Parameter logit per module, (b) multiplying the adapter output by g = sigmoid(logit) in forward(), (c) adding λ * g to the loss once per module and (d) at inference, removing modules whose g ≤ 0.5, keeping the computational graph identical to CAPABOOST.  The method keeps parameter overhead negligible (one scalar per module, e.g. <6 k parameters for DeBERTa-base) and introduces no additional FLOPs during deployment after pruning.",
+          "comparative_methods": [
+            "CAPABOOST (fixed parallel masked LoRA)"
+          ],
+          "models_to_use": [
+            "DeBERTa-v3-base (86 M parameters)"
+          ],
+          "datasets_to_use": [
+            "SQuAD-v2"
+          ],
+          "hyperparameters_to_search": {
+            "learning_rate": "1e-5-5e-4",
+            "lambda_l1": "1e-5,1e-4,1e-3",
+            "batch_size": "16,32,64",
+            "weight_decay": "0.0-0.05",
+            "seed": "1,2,3"
+          }
+        },
+        "experiment_runs": [
+          {
+            "run_id": "proposed-DeBERTa-v3-base-86-M-parameters--SQuAD-v2",
+            "method_name": "proposed",
+            "model_name": "DeBERTa-v3-base (86 M parameters)",
+            "dataset_name": "SQuAD-v2"
+          },
+          {
+            "run_id": "comparative-1-DeBERTa-v3-base-86-M-parameters--SQuAD-v2",
+            "method_name": "comparative-1",
+            "model_name": "DeBERTa-v3-base (86 M parameters)",
+            "dataset_name": "SQuAD-v2"
+          }
+        ]
       }
     ]
   }
