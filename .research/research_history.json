@@ -94,6 +94,10 @@
       "expected_result": "1) On RTE, CAPABOOST-LMS is expected to raise validation accuracy by ≈1.5-2 pp over CAPABOOST and to reduce the train-val gap by ~30 %.\n2) On SQuADv2 (0.08 % budget) CAPABOOST-LMS should surpass fully-fine-tuning by ~0.3 F1 and beat CAPABOOST by ~0.6 F1 while keeping the parameter/FLOP budget unchanged.  Roughly half of the gates will be driven below 0.5, demonstrating automatic capacity selection.",
       "expected_conclusion": "Adding a single learnable scalar gate per parallel masked module gives CAPABOOST the ability to allocate capacity where it matters and to silence redundant updates, directly targeting the previously reported over-fitting and inefficient parameter allocation.  The modification is tiny (≪0.01 % parameters, one line in forward, one regularization term) yet yields measurable gains on difficult low-resource settings, and produces a more compact model at inference time.  The idea is generic and can be plugged into any PEFT method that uses parallel low-rank or adapter modules."
     },
-    "iterations": []
+    "iterations": [
+      {
+        "method": "We propose CAPABOOST-LMS (Learnable Mask Scaling).  The change is only to multiply each parallel masked low-rank update with one scalar gate g_i that is learned during fine-tuning and to add an L1 penalty that pushes the gates toward 0, so unneeded modules are suppressed.\n\nFor a LoRA-style layer in CAPABOOST the original update is\n  ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai)\nWe replace it with\n  ΔW = Σ_i σ(s_i) · (B_i ⊙ m_bi)(A_i ⊙ m_ai)   (1)\nwhere s_i is an unrestricted real parameter, σ(·) is the sigmoid, and g_i = σ(s_i)∈(0,1).  The learning objective becomes\n  L_total = L_task + λ Σ_i g_i                               (2)\nwith a small λ (e.g. 1e-4).  Equation (2) keeps modules that help the task loss and prunes the others by driving the corresponding g_i→0.  At inference time we hard-threshold g_i (e.g. g_i>0.5) to obtain a sparse, capacity-adjusted model with exactly the same computational form as CAPABOOST."
+      }
+    ]
   }
 }
