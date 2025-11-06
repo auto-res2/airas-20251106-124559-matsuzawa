@@ -1,0 +1,347 @@
+
+LLM Name: o3-2025-04-16
+Input:
+You are a cutting-edge AI researcher generating complete, executable code for research paper experiments with Hydra configuration management.
+
+Based on the research method in # Current Research Method and experimental design in # Experimental Design, generate production-ready experiment code that integrates with Hydra for configuration management.
+
+# Instructions: Complete Experiment Code Generation
+
+## Core Requirements
+- COMPLETE IMPLEMENTATION: Every component must be fully functional, production-ready, publication-worthy code. No "omitted for brevity", no "simplified version", no TODO, PLACEHOLDER, pass, or ...
+- PYTORCH EXCLUSIVELY: Use PyTorch as the deep learning framework
+- HYDRA INTEGRATION: Use Hydra to manage all experiment configurations from `config/run/*.yaml` files. Use `config_path="../config"` in all @hydra.main decorators
+- COMPLETE DATA PIPELINE: Full data loading and preprocessing implementation. Use `.cache/` as the cache directory for all datasets and models (e.g., for HuggingFace, set `cache_dir=".cache/"`)
+- WANDB REQUIRED: WandB is mandatory for metrics logging (except trial_mode validation)
+
+## Hydra Configuration Structure
+Each run config file (`config/run/{run_id}.yaml`) contains:
+- run_id: Unique identifier for this run
+- method: The method name (baseline, proposed, ablation, etc.)
+- model: Model-specific parameters (name, architecture details, hyperparameters)
+- dataset: Dataset-specific parameters (name, preprocessing settings, split ratios)
+- training: Training hyperparameters (learning rate, batch size, epochs, optimizer settings, validation split)
+- optuna: Hyperparameter search space definition for Optuna optimization
+
+## Command Line Interface
+The generated code must support the following CLI:
+
+**Training (main.py):**
+```bash
+# Full experiment with WandB logging
+uv run python -u -m src.main run={run_id} results_dir={path} mode=full
+
+# Trial mode (validation only, WandB disabled)
+uv run python -u -m src.main run={run_id} results_dir={path} mode=trial
+```
+- `run`: Experiment run_id (matching a run_id from config/run/*.yaml)
+- `results_dir`: Output directory (passed from GitHub Actions workflow)
+- `mode`: Execution mode (required parameter)
+  * `mode=trial`: Lightweight execution for validation (epochs=1, batches limited to 1-2, wandb.mode=disabled, optuna.n_trials=0)
+  * `mode=full`: Full experiment execution (wandb.mode=online, full epochs, full Optuna trials)
+  * **Code must automatically configure based on mode (e.g., `if cfg.mode == "trial": cfg.wandb.mode = "disabled"; cfg.optuna.n_trials = 0` elif `cfg.mode == "full": cfg.wandb.mode = "online"`)**
+
+**Evaluation (evaluate.py, independent execution):**
+```bash
+uv run python -m src.evaluate results_dir={path} run_ids='["run-1", "run-2", ...]'
+```
+- `results_dir`: Directory containing experiment metadata and where outputs will be saved
+- `run_ids`: JSON string list of run IDs to evaluate (e.g., '["run-1-proposed-bert-glue", "run-2-baseline-bert-glue"]')
+- Executed as a separate workflow after all training runs complete
+- **NOT called from main.py**
+
+## Script Structure (ExperimentCode format)
+Generate complete code for these files ONLY. Do not create any additional files beyond this structure:
+
+**`src/train.py`**: Single experiment run executor
+- Uses Hydra config to load all parameters
+- Called as subprocess by main.py
+- Responsibilities:
+  * Train model with given configuration
+  * Initialize WandB: `wandb.init(entity=cfg.wandb.entity, project=cfg.wandb.project, id=cfg.run.run_id, config=OmegaConf.to_container(cfg, resolve=True), resume="allow")`
+  * Skip `wandb.init()` if `cfg.wandb.mode == "disabled"` (trial_mode)
+  * **Optuna Integration**: If using Optuna for hyperparameter search, DO NOT log intermediate trial results to WandB - only train once with the best hyperparameters after optimization completes and log that final run
+  * **Log ALL metrics to WandB comprehensively**:
+    - Use `wandb.log()` at each training step/batch/epoch with ALL relevant metrics
+    - Log as frequently as possible (per-batch or per-epoch) to capture training dynamics
+    - Use CONSISTENT metric names across train.py and evaluate.py (e.g., if train.py logs "train_acc", evaluate.py MUST use run.history(keys=["train_acc",...]))
+  * **Save final/best metrics to WandB summary**:
+    - Use `wandb.summary["key"] = value` for final results
+  * Print WandB run URL to stdout
+- **NO results.json, no stdout JSON output, no figure generation**
+
+**`src/evaluate.py`**: Independent evaluation and visualization script
+- **Execution**: Run independently via `uv run python -m src.evaluate results_dir={path} run_ids='["run-1", "run-2"]'`
+- **NOT called from main.py** - executes as separate workflow after all training completes
+- **Responsibilities**:
+  * Parse command line arguments:
+    - `results_dir`: Output directory path
+    - `run_ids`: JSON string list of run IDs (parse with `json.loads(args.run_ids)`)
+  * Load WandB config from `config/config.yaml` (in repository root)
+  * **Retrieve comprehensive experimental data from WandB API** for specified run_ids:
+    ```python
+    import json
+    api = wandb.Api()
+    run_ids = json.loads(args.run_ids)  # Parse JSON string to list
+    for run_id in run_ids:
+        run = api.run(f"{entity}/{project}/{run_id}")
+        history = run.history()  # pandas DataFrame with ALL time-series metrics (train_loss, val_acc, etc.)
+        summary = run.summary._json_dict  # Final/best metrics (best_val_acc, final_test_acc, etc.)
+        config = dict(run.config)  # Run configuration (hyperparameters, model settings, etc.)
+    ```
+  * **STEP 1: Per-Run Processing** (for each run_id):
+    - Export **comprehensive** run-specific metrics to: `{results_dir}/{run_id}/metrics.json`
+    - Generate run-specific figures (learning curves, confusion matrices) to: `{results_dir}/{run_id}/`
+    - Each run should have its own subdirectory with its metrics and figures
+  * **STEP 2: Aggregated Analysis** (after processing all runs):
+    - Export aggregated metrics to: `{results_dir}/comparison/aggregated_metrics.json`
+    - Compute secondary/derived metrics (e.g., improvement rate: (proposed - baseline) / baseline)
+    - Generate comparison figures to: `{results_dir}/comparison/`:
+      * Cross-run comparison charts (bar charts, box plots)
+      * Performance metrics tables
+      * Statistical significance tests
+  * **Figure Generation Guidelines**:
+    - Use matplotlib or seaborn with proper legends, annotations, tight_layout
+    - For line graphs: annotate significant values (final/best values)
+    - For bar graphs: annotate values above each bar
+    - Use GLOBALLY UNIQUE image filenames to prevent collisions across different runs and directories**:
+      * Per-run figures: `{run_id}_{figure_topic}[_<condition>][_pairN].pdf` (e.g., `run-1-proposed-bert-glue_learning_curve.pdf`)
+      * Comparison figures: `comparison_{figure_topic}[_<condition>][_pairN].pdf` (e.g., `comparison_accuracy_bar_chart.pdf`)
+  * Print all generated file paths to stdout (both per-run and comparison)
+
+**`src/preprocess.py`**: Complete preprocessing pipeline implementation for the specified datasets
+
+**`src/model.py`**: Complete model architecture implementations for all methods (proposed and comparative methods)
+
+**`src/main.py`**: Main orchestrator
+- Receives run_id via Hydra, launches train.py as subprocess, manages logs
+- **DOES NOT call evaluate.py** (evaluate.py runs independently in separate workflow)
+- Use `@hydra.main(config_path="../config")` since execution is from repository root
+- **Mode handling**: Automatically configure based on `cfg.mode`:
+  * When `cfg.mode == "trial"`: Set `cfg.wandb.mode = "disabled"`, `cfg.optuna.n_trials = 0`, epochs=1, etc.
+  * When `cfg.mode == "full"`: Set `cfg.wandb.mode = "online"` and use full configuration
+
+**`config/config.yaml`**: Main Hydra configuration file
+- MUST include WandB configuration:
+  ```yaml
+  wandb:
+    entity: gengaru617-personal
+    project: 251106-test
+    mode: online  # Automatically set to "disabled" in trial_mode
+  ```
+- `WANDB_API_KEY` environment variable is automatically available for authentication
+
+**`pyproject.toml`**: Complete project dependencies
+- MUST include: `hydra-core`, `wandb` (required)
+- Include as needed: `optuna`, `torch`, `transformers`, `datasets`, etc.
+
+
+## Key Implementation Focus Areas
+1. **Hydra-Driven Configuration**: All parameters loaded from run configs dynamically
+2. **Algorithm Core**: Full implementation of the proposed method with proper abstraction
+3. **Mode-Based Behavior**: Code must automatically configure based on `cfg.mode` ("trial" vs "full")
+   - `mode=trial`: Set `cfg.wandb.mode="disabled"`, `cfg.optuna.n_trials=0`, epochs=1, limited batches
+   - `mode=full`: Set `cfg.wandb.mode="online"`, use full configuration
+4. **Run Execution**: main.py executes a single run_id passed via CLI (GitHub Actions dispatches multiple runs separately)
+5. **WandB Integration**: All metrics logged to WandB; train.py does NOT output JSON to stdout or save results.json
+6. **Independent Evaluation**: evaluate.py runs separately, fetches data from WandB API, generates all figures
+
+
+
+## Code Validation Feedback
+
+
+
+
+# Experimental Environment
+NVIDIA A100×8
+VRAM：80GB×8
+RAM：2048 GB
+
+# Hypothesis
+open_problems='CAPABOOST increases the effective rank of PEFT updates by adding several parallel masked low-rank modules, but the contribution of every module is fixed. 1) When the internal dimension (rank r) or the number of parallel modules is large, the uniform use of all modules frequently causes over-fitting on low-resource tasks. 2) In very tight parameter budgets, the same amount of added capacity is allocated to every Transformer layer although different layers usually need different amounts of extra capacity. A minimal, learnable way of turning off redundant modules or layers is missing.' method='We propose CAPABOOST-LMS (Learnable Mask Scaling).  The change is only to multiply each parallel masked low-rank update with one scalar gate g_i that is learned during fine-tuning and to add an L1 penalty that pushes the gates toward 0, so unneeded modules are suppressed.\n\nFor a LoRA-style layer in CAPABOOST the original update is\n  ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai)\nWe replace it with\n  ΔW = Σ_i σ(s_i) · (B_i ⊙ m_bi)(A_i ⊙ m_ai)   (1)\nwhere s_i is an unrestricted real parameter, σ(·) is the sigmoid, and g_i = σ(s_i)∈(0,1).  The learning objective becomes\n  L_total = L_task + λ Σ_i g_i                               (2)\nwith a small λ (e.g. 1e-4).  Equation (2) keeps modules that help the task loss and prunes the others by driving the corresponding g_i→0.  At inference time we hard-threshold g_i (e.g. g_i>0.5) to obtain a sparse, capacity-adjusted model with exactly the same computational form as CAPABOOST.' experimental_setup='Base model: DeBERTaV3-base.\nTasks: 1) RTE (2490 training examples, known to over-fit). 2) SQuADv2 with 0.08 % parameter budget, where CAPABOOST struggled.\nMethods compared: (a) LoRA, (b) CAPABOOST, (c) CAPABOOST-LMS (ours).\nHyper-parameters: same as CAPABOOST; new λ∈{1e-5,1e-4,1e-3}.  Rank r =32, 4 parallel modules for all runs so base and ours have identical theoretical capacity.\nEvaluation: RTE accuracy, SQuADv2 F1/EM.  Report mean of 3 seeds.\nHardware: single RTX-4090, batch size 32, 10 epochs.' experimental_code="# only the changed part inside a LoRA module\naimport torch, torch.nn as nn\nclass MaskedLowRank(nn.Module):\n    def __init__(self, A, B, mask_A, mask_B):\n        super().__init__()\n        self.A = nn.Parameter(A)   # (in_dim, r)\n        self.B = nn.Parameter(B)   # (r, out_dim)\n        self.register_buffer('mask_A', mask_A)\n        self.register_buffer('mask_B', mask_B)\n        # new learnable gate (one scalar)\n        self.logit = nn.Parameter(torch.zeros(1))  # s_i in text\n    def forward(self, x):\n        g = torch.sigmoid(self.logit)              # g_i in (0,1)\n        A_eff = self.A * self.mask_A\n        B_eff = self.B * self.mask_B\n        return g * (x @ A_eff @ B_eff)\n\n# loss addition inside training loop\nlambda_l1 = 1e-4\nloss = loss_task + lambda_l1 * sum(g.abs() for g in gate_list)" expected_result='1) On RTE, CAPABOOST-LMS is expected to raise validation accuracy by ≈1.5-2 pp over CAPABOOST and to reduce the train-val gap by ~30 %.\n2) On SQuADv2 (0.08 % budget) CAPABOOST-LMS should surpass fully-fine-tuning by ~0.3 F1 and beat CAPABOOST by ~0.6 F1 while keeping the parameter/FLOP budget unchanged.  Roughly half of the gates will be driven below 0.5, demonstrating automatic capacity selection.' expected_conclusion='Adding a single learnable scalar gate per parallel masked module gives CAPABOOST the ability to allocate capacity where it matters and to silence redundant updates, directly targeting the previously reported over-fitting and inefficient parameter allocation.  The modification is tiny (≪0.01 % parameters, one line in forward, one regularization term) yet yields measurable gains on difficult low-resource settings, and produces a more compact model at inference time.  The idea is generic and can be plugged into any PEFT method that uses parallel low-rank or adapter modules.'
+
+# Current Research Method
+We propose CAPABOOST-LMS (Learnable Mask Scaling).  The change is only to multiply each parallel masked low-rank update with one scalar gate g_i that is learned during fine-tuning and to add an L1 penalty that pushes the gates toward 0, so unneeded modules are suppressed.
+
+For a LoRA-style layer in CAPABOOST the original update is
+  ΔW = Σ_i (B_i ⊙ m_bi)(A_i ⊙ m_ai)
+We replace it with
+  ΔW = Σ_i σ(s_i) · (B_i ⊙ m_bi)(A_i ⊙ m_ai)   (1)
+where s_i is an unrestricted real parameter, σ(·) is the sigmoid, and g_i = σ(s_i)∈(0,1).  The learning objective becomes
+  L_total = L_task + λ Σ_i g_i                               (2)
+with a small λ (e.g. 1e-4).  Equation (2) keeps modules that help the task loss and prunes the others by driving the corresponding g_i→0.  At inference time we hard-threshold g_i (e.g. g_i>0.5) to obtain a sparse, capacity-adjusted model with exactly the same computational form as CAPABOOST.
+
+# Experimental Design
+- Summary: We will verify that CAPABOOST-LMS, a minimal extension of CAPABOOST that learns a scalar gate for every parallel masked low-rank module, alleviates over-fitting and reallocates capacity automatically.  Using the DeBERTa-v3-base encoder, we fine-tune with Parameter-Efficient Fine-Tuning (PEFT) in three flavours: (1) standard LoRA, (2) CAPABOOST (fixed use of all parallel modules) and (3) our CAPABOOST-LMS (each module multiplied by a learnable gate g_i regularised with an L1 term λ∑g_i).  All methods insert four rank-32 low-rank adapters into every attention and MLP weight matrix so raw capacity is identical.  Training is performed on the SQuAD-v2 question-answering benchmark with a very tight 0.08 % parameter budget.  The loss used by CAPABOOST-LMS is L_total = L_QA + λ∑g_i; at inference time gates with g_i ≤ 0.5 are hard-pruned, yielding a sparser update without changing the computational form.  We sweep λ and other standard hyper-parameters with grid search and report mean F1 / EM over three random seeds.  Because the available cluster provides 8 × A100-80 GB GPUs, runs can be distributed with data parallelism or accelerated via DeepSpeed-Zero-2, although each single run fits comfortably on one GPU.
+- Evaluation metrics: ['F1', 'Exact Match']
+
+# Experiment Runs
+
+- Run ID: proposed-DeBERTa-v3-base-86-M-parameters--SQuAD-v2
+  Method: proposed
+  Model: DeBERTa-v3-base (86 M parameters)
+  Dataset: SQuAD-v2
+  Config File: config/run/proposed-DeBERTa-v3-base-86-M-parameters--SQuAD-v2.yaml
+  
+  Config Content:
+  ```yaml
+  run_id: proposed-DeBERTa-v3-base-86-M-parameters--SQuAD-v2
+method: CAPABOOST-LMS
+model:
+  name: microsoft/deberta-v3-base
+  hidden_size: 768
+  num_hidden_layers: 12
+  parameter_efficiency:
+    technique: CAPABOOST-LMS
+    rank: 32            # r in the paper
+    num_parallel_modules: 4
+    gate:
+      enabled: true
+      init_logit: 0.0   # s_i initial value
+      lambda_l1: 1e-4   # will be tuned by Optuna
+      threshold: 0.5    # applied after training for hard-pruning
+  dropout: 0.1
+  layer_norm_eps: 1.0e-12
+dataset:
+  name: squad_v2
+  max_seq_length: 384
+  doc_stride: 128
+  version_2_with_negative: true
+  batch_size: 32        # will be tuned
+training:
+  epochs: 10
+  learning_rate: 2e-4   # will be tuned
+  optimizer: adamw
+  weight_decay: 0.01    # will be tuned
+  warmup_steps: 500
+  lr_scheduler: linear
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  seed: 1               # will be tuned
+  fp16: true
+  logging_steps: 100
+  save_strategy: epoch
+evaluation:
+  metrics: [F1, EM]
+  eval_steps: 1000
+  load_best_model_at_end: true
+optuna:
+  n_trials: 50
+  direction: maximize
+  search_space:
+    learning_rate:
+      type: loguniform
+      low: 1.0e-5
+      high: 5.0e-4
+    batch_size:
+      type: categorical
+      choices: [16, 32, 64]
+    weight_decay:
+      type: uniform
+      low: 0.0
+      high: 0.05
+    lambda_l1:
+      type: categorical
+      choices: [1.0e-5, 1.0e-4, 1.0e-3]
+    seed:
+      type: categorical
+      choices: [1, 2, 3]
+
+  ```
+  
+
+- Run ID: comparative-1-DeBERTa-v3-base-86-M-parameters--SQuAD-v2
+  Method: comparative-1
+  Model: DeBERTa-v3-base (86 M parameters)
+  Dataset: SQuAD-v2
+  Config File: config/run/comparative-1-DeBERTa-v3-base-86-M-parameters--SQuAD-v2.yaml
+  
+  Config Content:
+  ```yaml
+  run_id: comparative-1-DeBERTa-v3-base-86-M-parameters--SQuAD-v2
+method: CAPABOOST
+model:
+  name: microsoft/deberta-v3-base
+  hidden_size: 768
+  num_hidden_layers: 12
+  parameter_efficiency:
+    technique: CAPABOOST
+    rank: 32
+    num_parallel_modules: 4
+    gate:
+      enabled: false    # no learnable masking
+  dropout: 0.1
+  layer_norm_eps: 1.0e-12
+dataset:
+  name: squad_v2
+  max_seq_length: 384
+  doc_stride: 128
+  version_2_with_negative: true
+  batch_size: 32
+training:
+  epochs: 10
+  learning_rate: 2e-4
+  optimizer: adamw
+  weight_decay: 0.01
+  warmup_steps: 500
+  lr_scheduler: linear
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  seed: 1
+  fp16: true
+  logging_steps: 100
+  save_strategy: epoch
+evaluation:
+  metrics: [F1, EM]
+  eval_steps: 1000
+  load_best_model_at_end: true
+optuna:
+  n_trials: 50
+  direction: maximize
+  search_space:
+    learning_rate:
+      type: loguniform
+      low: 1.0e-5
+      high: 5.0e-4
+    batch_size:
+      type: categorical
+      choices: [16, 32, 64]
+    weight_decay:
+      type: uniform
+      low: 0.0
+      high: 0.05
+    seed:
+      type: categorical
+      choices: [1, 2, 3]
+
+  ```
+  
+
+
+# External Resources (Use these for implementation)
+
+**HuggingFace Models:**
+
+- ID: microsoft/deberta-v3-base
+
+
+
+**HuggingFace Datasets:**
+
+- ID: rajpurkar/squad_v2
+
+
+
+
+Generate complete, production-ready experiment code that integrates with Hydra configuration system.
+Output:
+{
+    "train_py": "import os\nimport sys\nimport math\nimport json\nimport time\nfrom pathlib import Path\nfrom typing import Dict, Any\n\nimport torch\nimport torch.nn.functional as F\nfrom torch import nn\nfrom torch.utils.data import DataLoader\nfrom torch.cuda.amp import GradScaler, autocast\n\nimport optuna\nimport wandb\nimport numpy as np\nfrom omegaconf import OmegaConf\n\nfrom transformers import (\n    AutoTokenizer,\n    AutoConfig,\n    AutoModelForQuestionAnswering,\n    AdamW,\n    get_linear_schedule_with_warmup,\n    default_data_collator,\n)\n\nimport hydra\nfrom hydra.utils import instantiate, to_absolute_path\n\nfrom src.preprocess import build_dataloaders, build_metric\nfrom src.model import apply_parameter_efficiency, get_gate_l1_loss, hard_prune_gates\n\n################################################################################\n# Helper functions\n################################################################################\n\ndef set_seed(seed: int):\n    import random, os\n    random.seed(seed)\n    np.random.seed(seed)\n    torch.manual_seed(seed)\n    torch.cuda.manual_seed_all(seed)\n\n\ndef configure_wandb(cfg):\n    if cfg.wandb.mode == \"disabled\":\n        os.environ[\"WANDB_MODE\"] = \"disabled\"\n        return None\n\n    run = wandb.init(\n        entity=cfg.wandb.entity,\n        project=cfg.wandb.project,\n        id=cfg.run.run_id,\n        config=OmegaConf.to_container(cfg, resolve=True),\n        resume=\"allow\",\n    )\n    print(f\"Weights & Biases URL: {run.url}\")\n    return run\n\n\n################################################################################\n# Training logic\n################################################################################\n\ndef train_single_run(cfg) -> Dict[str, Any]:\n    device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n    set_seed(cfg.training.seed)\n\n    # ------------------------------------------------------------------\n    # Data pipeline\n    # ------------------------------------------------------------------\n    tokenizer = AutoTokenizer.from_pretrained(cfg.model.name, cache_dir=\".cache/\")\n    train_loader, eval_loader, raw_datasets, eval_features = build_dataloaders(cfg, tokenizer)\n\n    # ------------------------------------------------------------------\n    # Model\n    # ------------------------------------------------------------------\n    model_config = AutoConfig.from_pretrained(\n        cfg.model.name, cache_dir=\".cache/\", num_labels=2\n    )\n    base_model = AutoModelForQuestionAnswering.from_pretrained(\n        cfg.model.name,\n        cache_dir=\".cache/\",\n        config=model_config,\n    )\n    # Freeze everything\n    for p in base_model.parameters():\n        p.requires_grad = False\n\n    # Inject adapters / CAPABOOST(-LMS)\n    apply_parameter_efficiency(base_model, cfg)\n    base_model.to(device)\n\n    # ------------------------------------------------------------------\n    # Optimizer & Scheduler\n    # ------------------------------------------------------------------\n    trainable_parameters = [p for p in base_model.parameters() if p.requires_grad]\n    optimizer = AdamW(\n        trainable_parameters,\n        lr=cfg.training.learning_rate,\n        weight_decay=cfg.training.weight_decay,\n    )\n    total_training_steps = (\n        len(train_loader) // cfg.training.gradient_accumulation_steps * cfg.training.epochs\n    )\n    scheduler = get_linear_schedule_with_warmup(\n        optimizer,\n        num_warmup_steps=cfg.training.warmup_steps,\n        num_training_steps=total_training_steps,\n    )\n\n    scaler = GradScaler(enabled=cfg.training.fp16)\n    wandb_run = configure_wandb(cfg)\n\n    # ------------------------------------------------------------------\n    # Training loop\n    # ------------------------------------------------------------------\n    global_step = 0\n    best_f1 = -float(\"inf\")\n    metric = build_metric()\n\n    for epoch in range(cfg.training.epochs):\n        base_model.train()\n        epoch_loss = 0.0\n        for step, batch in enumerate(train_loader):\n            if cfg.mode == \"trial\" and step >= 2:\n                break  # drastically shorten in trial mode\n\n            inputs = {k: v.to(device) for k, v in batch.items() if k in [\"input_ids\", \"attention_mask\"]}\n            start_positions = batch[\"start_positions\"].to(device)\n            end_positions = batch[\"end_positions\"].to(device)\n\n            with autocast(enabled=cfg.training.fp16):\n                outputs = base_model(**inputs)\n                start_logits = outputs.start_logits\n                end_logits = outputs.end_logits\n                loss_start = F.cross_entropy(start_logits, start_positions)\n                loss_end = F.cross_entropy(end_logits, end_positions)\n                qa_loss = (loss_start + loss_end) / 2.0\n                l1_loss = cfg.model.parameter_efficiency.gate.lambda_l1 * get_gate_l1_loss(base_model)\n                loss = qa_loss + l1_loss\n            scaler.scale(loss / cfg.training.gradient_accumulation_steps).backward()\n\n            if (step + 1) % cfg.training.gradient_accumulation_steps == 0:\n                scaler.step(optimizer)\n                scaler.update()\n                optimizer.zero_grad(set_to_none=True)\n                scheduler.step()\n                global_step += 1\n\n            epoch_loss += loss.item()\n\n            if (\n                wandb_run is not None\n                and step % cfg.training.logging_steps == 0\n                and (step != 0 or epoch != 0)\n            ):\n                wandb.log(\n                    {\n                        \"train_loss\": loss.item(),\n                        \"qa_loss\": qa_loss.item(),\n                        \"l1_loss\": l1_loss.item(),\n                        \"lr\": scheduler.get_last_lr()[0],\n                        \"step\": global_step,\n                        \"epoch\": epoch,\n                    },\n                    step=global_step,\n                )\n\n        # ------------------------------------------------------------------\n        # Evaluation per epoch\n        # ------------------------------------------------------------------\n        base_model.eval()\n        all_start_logits = []\n        all_end_logits = []\n        for batch in eval_loader:\n            with torch.no_grad():\n                inputs = {k: v.to(device) for k, v in batch.items() if k in [\"input_ids\", \"attention_mask\"]}\n                with autocast(enabled=cfg.training.fp16):\n                    outputs = base_model(**inputs)\n                all_start_logits.append(outputs.start_logits.cpu())\n                all_end_logits.append(outputs.end_logits.cpu())\n        start_logits = torch.cat(all_start_logits, dim=0).numpy()\n        end_logits = torch.cat(all_end_logits, dim=0).numpy()\n\n        # Post-process predictions & compute metrics\n        from src.preprocess import postprocess_qa_predictions\n\n        predictions = postprocess_qa_predictions(\n            raw_datasets[\"validation\"], eval_features, (start_logits, end_logits)\n        )\n        references = [\n            {\"id\": ex[\"id\"], \"answers\": ex[\"answers\"]}\n            for ex in raw_datasets[\"validation\"]\n        ]\n        metric_res = metric.compute(predictions=predictions, references=references)\n        em = metric_res[\"exact_match\"]\n        f1 = metric_res[\"f1\"]\n\n        if wandb_run is not None:\n            wandb.log({\"eval_f1\": f1, \"eval_em\": em, \"epoch\": epoch}, step=global_step)\n        if f1 > best_f1:\n            best_f1 = f1\n            # Save best model (adapters only)\n            output_dir = Path(cfg.results_dir) / cfg.run.run_id\n            output_dir.mkdir(parents=True, exist_ok=True)\n            torch.save(\n                {\n                    \"adapter_state_dict\": {\n                        k: v.cpu() for k, v in base_model.state_dict().items() if v.requires_grad\n                    },\n                    \"config\": OmegaConf.to_container(cfg, resolve=True),\n                },\n                output_dir / \"best_adapter.pt\",\n            )\n\n        print(\n            f\"Epoch {epoch + 1}/{cfg.training.epochs} | Loss {epoch_loss/len(train_loader):.4f} | F1 {f1:.2f} | EM {em:.2f}\"\n        )\n\n    # ----------------------------------------------------------------------\n    # Hard prune gates & compute sparsity\n    # ----------------------------------------------------------------------\n    if cfg.model.parameter_efficiency.gate.enabled:\n        hard_prune_gates(base_model, threshold=cfg.model.parameter_efficiency.gate.threshold)\n        num_gates = cfg.model.parameter_efficiency.num_parallel_modules * len(\n            [m for m in base_model.modules() if isinstance(m, nn.Linear)]\n        )\n        active_gates = 0\n        for m in base_model.modules():\n            if hasattr(m, \"logit\"):\n                active_gates += (torch.sigmoid(m.logit) > cfg.model.parameter_efficiency.gate.threshold).sum().item()\n        sparsity = 1.0 - active_gates / num_gates\n    else:\n        sparsity = 0.0\n\n    if wandb_run is not None:\n        wandb_run.summary[\"best_f1\"] = best_f1\n        wandb_run.summary[\"sparsity\"] = sparsity\n        wandb_run.finish()\n\n    return {\"best_f1\": best_f1, \"sparsity\": sparsity}\n\n\n# -----------------------------------------------------------------------------\n# Optuna hyper-parameter optimisation wrapper\n# -----------------------------------------------------------------------------\n\ndef run_with_optuna(cfg):\n    search_space = cfg.optuna.search_space\n\n    def suggest(trial: optuna.Trial, space):\n        params = {}\n        for key, spec in space.items():\n            if spec[\"type\"] == \"categorical\":\n                params[key] = trial.suggest_categorical(key, spec[\"choices\"])\n            elif spec[\"type\"] == \"loguniform\":\n                params[key] = trial.suggest_float(key, spec[\"low\"], spec[\"high\"], log=True)\n            elif spec[\"type\"] == \"uniform\":\n                params[key] = trial.suggest_float(key, spec[\"low\"], spec[\"high\"])\n            else:\n                raise ValueError(f\"Unknown hyperparameter type: {spec['type']}\")\n        return params\n\n    def objective(trial: optuna.Trial):\n        sampled = suggest(trial, search_space)\n        merged_cfg = OmegaConf.merge(cfg, OmegaConf.create({\"training\": sampled, \"model\": {\"parameter_efficiency\": {\"gate\": {\"lambda_l1\": sampled.get(\"lambda_l1\", cfg.model.parameter_efficiency.gate.lambda_l1)}}}))\n        # Disable wandb inside objective\n        merged_cfg.wandb.mode = \"disabled\"\n        result = train_single_run(merged_cfg)\n        return result[\"best_f1\"]\n\n    study = optuna.create_study(direction=cfg.optuna.direction)\n    study.optimize(objective, n_trials=cfg.optuna.n_trials)\n\n    print(\"[Optuna] Best trial:\")\n    print(study.best_trial.params)\n\n    # Merge best params back to cfg\n    cfg = OmegaConf.merge(cfg, OmegaConf.create({\"training\": study.best_trial.params}))\n    cfg.model.parameter_efficiency.gate.lambda_l1 = study.best_trial.params.get(\n        \"lambda_l1\", cfg.model.parameter_efficiency.gate.lambda_l1\n    )\n    return train_single_run(cfg)\n\n\n################################################################################\n# Hydra entry point\n################################################################################\n\n@hydra.main(config_path=\"../config\", config_name=\"config\")\ndef _main(cfg):\n    # cfg now contains base config; we load run-specific YAML and merge\n    run_cfg_path = Path(to_absolute_path(\"config/run\")) / f\"{cfg.run}.yaml\"\n    if not run_cfg_path.exists():\n        raise FileNotFoundError(f\"Run config {run_cfg_path} does not exist.\")\n    run_cfg = OmegaConf.load(run_cfg_path)\n    cfg = OmegaConf.merge(cfg, run_cfg)\n\n    # Mode handling\n    if cfg.mode == \"trial\":\n        cfg.wandb.mode = \"disabled\"\n        cfg.optuna.n_trials = 0\n        cfg.training.epochs = 1\n    elif cfg.mode == \"full\":\n        cfg.wandb.mode = \"online\"\n    else:\n        raise ValueError(\"mode must be 'trial' or 'full'\")\n\n    # \"results_dir\" comes from CLI override in Github Actions\n    if not hasattr(cfg, \"results_dir\"):\n        cfg.results_dir = \"./results\"\n\n    (Path(cfg.results_dir) / cfg.run.run_id).mkdir(parents=True, exist_ok=True)\n\n    if cfg.optuna.n_trials and cfg.optuna.n_trials > 0:\n        run_with_optuna(cfg)\n    else:\n        train_single_run(cfg)\n\n\nif __name__ == \"__main__\":\n    _main()\n",
+    "evaluate_py": "import argparse\nimport json\nfrom pathlib import Path\nfrom typing import List, Dict\n\nimport wandb\nimport pandas as pd\nimport numpy as np\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nimport yaml\n\nplt.switch_backend(\"Agg\")  # Headless environments\n\n\n################################################################################\n# Utility functions\n################################################################################\n\ndef save_json(obj: Dict, path: Path):\n    path.parent.mkdir(parents=True, exist_ok=True)\n    with open(path, \"w\") as f:\n        json.dump(obj, f, indent=2)\n\n\ndef plot_learning_curve(df: pd.DataFrame, run_id: str, out_dir: Path):\n    fig, ax = plt.subplots(figsize=(8, 5))\n    if \"train_loss\" in df.columns:\n        sns.lineplot(data=df, x=df.index, y=\"train_loss\", ax=ax, label=\"train_loss\")\n    if \"eval_f1\" in df.columns:\n        sns.lineplot(data=df, x=df.index, y=\"eval_f1\", ax=ax, label=\"eval_f1\")\n    ax.set_title(f\"Learning curve - {run_id}\")\n    ax.set_xlabel(\"Step\")\n    ax.set_ylabel(\"Metric value\")\n    ax.legend()\n    fig.tight_layout()\n    filename = out_dir / f\"{run_id}_learning_curve.pdf\"\n    fig.savefig(filename)\n    plt.close(fig)\n    return filename\n\n\ndef plot_comparison_bar(metric_name: str, metrics: Dict[str, float], out_dir: Path):\n    fig, ax = plt.subplots(figsize=(8, 5))\n    run_ids = list(metrics.keys())\n    values = [metrics[r] for r in run_ids]\n    sns.barplot(x=run_ids, y=values, ax=ax)\n    for i, v in enumerate(values):\n        ax.text(i, v, f\"{v:.2f}\", ha=\"center\", va=\"bottom\", fontsize=9)\n    ax.set_ylabel(metric_name)\n    ax.set_title(f\"{metric_name} comparison across runs\")\n    fig.tight_layout()\n    filename = out_dir / f\"comparison_{metric_name}_bar_chart.pdf\"\n    fig.savefig(filename)\n    plt.close(fig)\n    return filename\n\n\n################################################################################\n# Main evaluation script\n################################################################################\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--results_dir\", type=str, required=True)\n    parser.add_argument(\"--run_ids\", type=str, required=True, help=\"JSON list of run IDs\")\n    args = parser.parse_args()\n\n    results_dir = Path(args.results_dir)\n    run_ids: List[str] = json.loads(args.run_ids)\n\n    # Load global WandB config\n    with open(\"config/config.yaml\", \"r\") as f:\n        cfg_yaml = yaml.safe_load(f)\n    entity = cfg_yaml[\"wandb\"][\"entity\"]\n    project = cfg_yaml[\"wandb\"][\"project\"]\n\n    api = wandb.Api()\n    per_run_paths = []\n\n    aggregated_metrics = {}\n\n    for run_id in run_ids:\n        run = api.run(f\"{entity}/{project}/{run_id}\")\n        history_df = run.history()\n        summary = dict(run.summary)\n        config = dict(run.config)\n\n        # ------------------------------------------------------------------\n        # Save raw metrics\n        # ------------------------------------------------------------------\n        out_dir = results_dir / run_id\n        out_dir.mkdir(parents=True, exist_ok=True)\n        save_json(history_df.to_dict(orient=\"list\"), out_dir / \"history.json\")\n        save_json(summary, out_dir / \"summary.json\")\n        save_json(config, out_dir / \"config.json\")\n\n        # ------------------------------------------------------------------\n        # Generate figures\n        # ------------------------------------------------------------------\n        lc_path = plot_learning_curve(history_df, run_id, out_dir)\n        per_run_paths.append(str(lc_path))\n\n        # ------------------------------------------------------------------\n        # Aggregated metrics\n        # ------------------------------------------------------------------\n        aggregated_metrics[run_id] = {\n            \"best_f1\": summary.get(\"best_f1\", float(\"nan\")),\n            \"sparsity\": summary.get(\"sparsity\", float(\"nan\")),\n        }\n\n    # ----------------------------------------------------------------------\n    # Comparison figures & metrics\n    # ----------------------------------------------------------------------\n    comparison_dir = results_dir / \"comparison\"\n    comparison_dir.mkdir(parents=True, exist_ok=True)\n\n    # Save aggregated metrics JSON\n    save_json(aggregated_metrics, comparison_dir / \"aggregated_metrics.json\")\n\n    # Plot bar charts for F1 and sparsity\n    f1_values = {k: v[\"best_f1\"] for k, v in aggregated_metrics.items() if not np.isnan(v[\"best_f1\"]) }\n    sparsity_values = {k: v[\"sparsity\"] for k, v in aggregated_metrics.items() if not np.isnan(v[\"sparsity\"]) }\n\n    if f1_values:\n        f1_chart = plot_comparison_bar(\"F1\", f1_values, comparison_dir)\n        per_run_paths.append(str(f1_chart))\n    if sparsity_values:\n        sparsity_chart = plot_comparison_bar(\"sparsity\", sparsity_values, comparison_dir)\n        per_run_paths.append(str(sparsity_chart))\n\n    # Print generated paths\n    for p in per_run_paths:\n        print(p)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "preprocess_py": "\"\"\"Dataset loading & preprocessing utilities for SQuAD-v2.\nThis module follows the standard approach used in HuggingFace's `run_qa_no_trainer.py` example.\n\"\"\"\n\nfrom typing import Tuple, Dict\nfrom pathlib import Path\n\nimport torch\nfrom datasets import load_dataset\nfrom transformers import AutoTokenizer, default_data_collator\nfrom torch.utils.data import DataLoader\nimport evaluate\n\n\ndef build_metric():\n    return evaluate.load(\"squad_v2\")\n\n\ndef _prepare_train_features(tokenizer, max_seq_length, doc_stride):\n    def fn(examples):\n        # Remove leading whitespace for questions\n        examples[\"question\"] = [q.lstrip() for q in examples[\"question\"]]\n        tokenized_examples = tokenizer(\n            examples[\"question\"],\n            examples[\"context\"],\n            truncation=\"only_second\",\n            max_length=max_seq_length,\n            stride=doc_stride,\n            return_overflowing_tokens=True,\n            return_offsets_mapping=True,\n            padding=\"max_length\",\n        )\n        sample_mapping = tokenized_examples.pop(\"overflow_to_sample_mapping\")\n        offset_mapping = tokenized_examples.pop(\"offset_mapping\")\n\n        start_positions = []\n        end_positions = []\n\n        for i, offsets in enumerate(offset_mapping):\n            input_ids = tokenized_examples[\"input_ids\"][i]\n            cls_index = input_ids.index(tokenizer.cls_token_id)\n\n            sequence_ids = tokenized_examples.sequence_ids(i)\n            sample_index = sample_mapping[i]\n            answers = examples[\"answers\"][sample_index]\n            if len(answers[\"answer_start\"]) == 0:\n                start_positions.append(cls_index)\n                end_positions.append(cls_index)\n                continue\n            # Start/end character index of the answer in the text\n            start_char = answers[\"answer_start\"][0]\n            end_char = start_char + len(answers[\"text\"][0])\n\n            # Start token index of the current span in the text\n            token_start_index = 0\n            while sequence_ids[token_start_index] != 1:\n                token_start_index += 1\n            token_end_index = len(input_ids) - 1\n            while sequence_ids[token_end_index] != 1:\n                token_end_index -= 1\n            if not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char):\n                start_positions.append(cls_index)\n                end_positions.append(cls_index)\n            else:\n                while token_start_index < len(offsets) and offsets[token_start_index][0] <= start_char:\n                    token_start_index += 1\n                start_positions.append(token_start_index - 1)\n                while offsets[token_end_index][1] >= end_char:\n                    token_end_index -= 1\n                end_positions.append(token_end_index + 1)\n        tokenized_examples[\"start_positions\"] = start_positions\n        tokenized_examples[\"end_positions\"] = end_positions\n        return tokenized_examples\n\n    return fn\n\n\ndef _prepare_validation_features(tokenizer, max_seq_length, doc_stride):\n    def fn(examples):\n        examples[\"question\"] = [q.lstrip() for q in examples[\"question\"]]\n        tokenized_examples = tokenizer(\n            examples[\"question\"],\n            examples[\"context\"],\n            truncation=\"only_second\",\n            max_length=max_seq_length,\n            stride=doc_stride,\n            return_overflowing_tokens=True,\n            return_offsets_mapping=True,\n            padding=\"max_length\",\n        )\n        sample_mapping = tokenized_examples.pop(\"overflow_to_sample_mapping\")\n        tokenized_examples[\"example_id\"] = []\n        for i in range(len(tokenized_examples[\"input_ids\"])):\n            sequence_ids = tokenized_examples.sequence_ids(i)\n            context_index = 1\n            sample_index = sample_mapping[i]\n            tokenized_examples[\"example_id\"].append(examples[\"id\"][sample_index])\n            tokenized_examples[\"offset_mapping\"][i] = [\n                (o if sequence_ids[k] == context_index else None)\n                for k, o in enumerate(tokenized_examples[\"offset_mapping\"][i])\n            ]\n        return tokenized_examples\n\n    return fn\n\n\ndef build_dataloaders(cfg, tokenizer):\n    dataset = load_dataset(\"rajpurkar/squad_v2\", cache_dir=\".cache/\")\n\n    train_dataset = dataset[\"train\"].shuffle(seed=cfg.training.seed)\n    validation_dataset = dataset[\"validation\"]\n\n    train_dataset = train_dataset.map(\n        _prepare_train_features(tokenizer, cfg.dataset.max_seq_length, cfg.dataset.doc_stride),\n        batched=True,\n        remove_columns=train_dataset.column_names,\n        desc=\"Training data tokenization\",\n    )\n    validation_features = validation_dataset.map(\n        _prepare_validation_features(tokenizer, cfg.dataset.max_seq_length, cfg.dataset.doc_stride),\n        batched=True,\n        remove_columns=validation_dataset.column_names,\n        desc=\"Validation data tokenization\",\n    )\n\n    train_dataloader = DataLoader(\n        train_dataset,\n        shuffle=True,\n        batch_size=cfg.dataset.batch_size,\n        collate_fn=default_data_collator,\n    )\n    eval_dataloader = DataLoader(\n        validation_features,\n        shuffle=False,\n        batch_size=cfg.dataset.batch_size,\n        collate_fn=default_data_collator,\n    )\n    return train_dataloader, eval_dataloader, dataset, validation_features\n\n\n# ---------------------------------------------------------------------------\n# Post-processing of predictions\n# ---------------------------------------------------------------------------\n\ndef postprocess_qa_predictions(examples, features, raw_predictions, n_best_size: int = 20, max_answer_length: int = 30):\n    import collections\n    import numpy as np\n\n    all_start_logits, all_end_logits = raw_predictions\n    example_id_to_index = {k[\"id\"]: i for i, k in enumerate(examples)}\n    features_per_example = collections.defaultdict(list)\n    for i, f in enumerate(features):\n        features_per_example[f[\"example_id\"]].append(i)\n\n    predictions = collections.OrderedDict()\n    for example in examples:\n        example_id = example[\"id\"]\n        context = example[\"context\"]\n        feature_indices = features_per_example[example_id]\n        prelim_predictions = []\n        for idx in feature_indices:\n            start_logits = all_start_logits[idx]\n            end_logits = all_end_logits[idx]\n            offset_mapping = features[idx][\"offset_mapping\"]\n            cls_index = features[idx][\"input_ids\"].index(0)\n            start_logits = np.exp(start_logits - np.max(start_logits))\n            end_logits = np.exp(end_logits - np.max(end_logits))\n            start_probs = start_logits / start_logits.sum()\n            end_probs = end_logits / end_logits.sum()\n            for start_index in np.argsort(start_probs)[-1 : -n_best_size - 1 : -1]:\n                for end_index in np.argsort(end_probs)[-1 : -n_best_size - 1 : -1]:\n                    if start_index >= len(offset_mapping) or end_index >= len(offset_mapping):\n                        continue\n                    if offset_mapping[start_index] is None or offset_mapping[end_index] is None:\n                        continue\n                    if end_index < start_index or end_index - start_index + 1 > max_answer_length:\n                        continue\n                    prelim_predictions.append(\n                        {\n                            \"score\": start_probs[start_index] * end_probs[end_index],\n                            \"start_index\": start_index,\n                            \"end_index\": end_index,\n                            \"offsets\": (\n                                offset_mapping[start_index][0],\n                                offset_mapping[end_index][1],\n                            ),\n                        }\n                    )\n        if len(prelim_predictions) == 0:\n            predictions[example_id] = \"\"\n            continue\n        best_pred = max(prelim_predictions, key=lambda x: x[\"score\"])\n        start_char, end_char = best_pred[\"offsets\"]\n        predictions[example_id] = context[start_char:end_char]\n    return predictions\n",
+    "model_py": "\"\"\"Model utilities: injection of LoRA / CAPABOOST / CAPABOOST-LMS adapters into a HuggingFace model.\n\"\"\"\n\nfrom typing import List\nimport torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n###############################################################################\n# Core adapter classes\n###############################################################################\n\nclass _LowRankModule(nn.Module):\n    \"\"\"A single low-rank adapter: ΔW = B @ A.\"\"\"\n\n    def __init__(self, in_features: int, out_features: int, rank: int):\n        super().__init__()\n        self.A = nn.Parameter(torch.empty(rank, in_features))\n        self.B = nn.Parameter(torch.empty(out_features, rank))\n        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))\n        nn.init.zeros_(self.B)\n\n    def forward(self):\n        return self.B @ self.A  # (out, in)\n\n\nclass AdapterLinear(nn.Module):\n    \"\"\"Wraps an existing nn.Linear and adds CAPABOOST / CAPABOOST-LMS behaviour.\"\"\"\n\n    def __init__(\n        self,\n        orig_linear: nn.Linear,\n        technique: str,\n        rank: int,\n        num_parallel: int,\n        gate_cfg,\n    ):\n        super().__init__()\n        assert technique in {\"LoRA\", \"CAPABOOST\", \"CAPABOOST-LMS\"}\n        self.orig_weight = nn.Parameter(orig_linear.weight.data.clone(), requires_grad=False)\n        self.orig_bias = (\n            nn.Parameter(orig_linear.bias.data.clone(), requires_grad=False)\n            if orig_linear.bias is not None\n            else None\n        )\n        self.in_features = orig_linear.in_features\n        self.out_features = orig_linear.out_features\n        self.technique = technique\n        self.num_parallel = num_parallel if technique != \"LoRA\" else 1\n\n        # Create low-rank modules\n        self.adapters = nn.ModuleList(\n            [_LowRankModule(self.in_features, self.out_features, rank) for _ in range(self.num_parallel)]\n        )\n\n        # Gating parameters for CAPABOOST-LMS\n        if technique == \"CAPABOOST-LMS\" and gate_cfg.enabled:\n            self.logit = nn.Parameter(torch.full((self.num_parallel,), gate_cfg.init_logit))\n        else:\n            self.register_buffer(\"logit\", torch.ones(self.num_parallel))\n\n    def forward(self, x):\n        delta_w = 0.0\n        for i, adapter in enumerate(self.adapters):\n            g = torch.sigmoid(self.logit[i])\n            delta_w = delta_w + g * adapter()\n        weight = self.orig_weight + delta_w\n        return F.linear(x, weight, self.orig_bias)\n\n###############################################################################\n# Injection helpers\n###############################################################################\n\nimport math\n\n\ndef _replace_linear(module: nn.Module, cfg):\n    for name, child in list(module.named_children()):\n        if isinstance(child, nn.Linear):\n            wrapper = AdapterLinear(\n                child,\n                technique=cfg.model.parameter_efficiency.technique\n                if cfg.model.parameter_efficiency.technique is not None\n                else \"LoRA\",\n                rank=cfg.model.parameter_efficiency.rank,\n                num_parallel=cfg.model.parameter_efficiency.num_parallel_modules,\n                gate_cfg=cfg.model.parameter_efficiency.gate,\n            )\n            setattr(module, name, wrapper)\n        else:\n            _replace_linear(child, cfg)\n\n\ndef apply_parameter_efficiency(model: nn.Module, cfg):\n    \"\"\"Recursively replaces Linear layers with adapter-augmented versions.\"\"\"\n\n    _replace_linear(model, cfg)\n\n\n###############################################################################\n# Auxiliary functions\n###############################################################################\n\ndef get_gate_l1_loss(model: nn.Module) -> torch.Tensor:\n    l1 = 0.0\n    for m in model.modules():\n        if hasattr(m, \"logit\") and isinstance(m.logit, torch.Tensor) and m.logit.requires_grad:\n            l1 = l1 + torch.sigmoid(m.logit).sum()\n    return l1\n\n\ndef hard_prune_gates(model: nn.Module, threshold: float = 0.5):\n    for m in model.modules():\n        if hasattr(m, \"logit\") and isinstance(m.logit, torch.nn.Parameter):\n            with torch.no_grad():\n                g = torch.sigmoid(m.logit)\n                mask = (g > threshold).float()\n                m.logit.data = torch.where(mask == 1, m.logit.data, torch.tensor(-100.0, device=m.logit.device))\n",
+    "main_py": "import subprocess\nimport sys\nfrom pathlib import Path\n\nimport hydra\nfrom omegaconf import OmegaConf\nfrom hydra.utils import to_absolute_path\n\n\n@hydra.main(config_path=\"../config\", config_name=\"config\")\ndef main(cfg):\n    # Merge with run-specific config\n    run_cfg_path = Path(to_absolute_path(\"config/run\")) / f\"{cfg.run}.yaml\"\n    if not run_cfg_path.exists():\n        raise FileNotFoundError(run_cfg_path)\n    run_cfg = OmegaConf.load(run_cfg_path)\n    cfg = OmegaConf.merge(cfg, run_cfg)\n\n    # Mode handling\n    if cfg.mode == \"trial\":\n        cfg.wandb.mode = \"disabled\"\n        cfg.optuna.n_trials = 0\n        cfg.training.epochs = 1\n    elif cfg.mode == \"full\":\n        cfg.wandb.mode = \"online\"\n    else:\n        raise ValueError(\"mode must be 'trial' or 'full'\")\n\n    # Ensure results directory exists\n    results_dir = Path(cfg.results_dir)\n    results_dir.mkdir(parents=True, exist_ok=True)\n\n    # Call train.py as a subprocess, passing relevant overrides\n    cmd = [\n        sys.executable,\n        \"-m\",\n        \"src.train\",\n        f\"run={cfg.run}\",\n        f\"results_dir={cfg.results_dir}\",\n        f\"mode={cfg.mode}\",\n    ]\n    print(\"Executing:\", \" \".join(cmd))\n    subprocess.run(cmd, check=True)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "pyproject_toml": "[project]\nname = \"capaboost-lms-experiments\"\nversion = \"0.1.0\"\ndependencies = [\n    \"torch>=2.0.0\",\n    \"transformers>=4.33.0\",\n    \"datasets>=2.14.0\",\n    \"evaluate>=0.4.0\",\n    \"hydra-core>=1.3.2\",\n    \"wandb>=0.15.4\",\n    \"optuna>=3.2.0\",\n    \"matplotlib>=3.7.0\",\n    \"seaborn>=0.12.2\",\n    \"pandas>=2.0.3\",\n    \"numpy>=1.23.5\",\n]\n\n[build-system]\nrequires = [\"setuptools>=61.0\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+    "config_yaml": "run: null\nresults_dir: ./results\nmode: full\nwandb:\n  entity: gengaru617-personal\n  project: 251106-test\n  mode: online\n"
+}
